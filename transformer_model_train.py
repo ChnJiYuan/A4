@@ -37,7 +37,7 @@ template2id = {tpl: i for i, tpl in enumerate(sorted(template_set))}
 id2template = {i: tpl for tpl, i in template2id.items()}
 
 # -----------------------------------
-# 2. BIO tag generation for multi-word cities
+# 2. BIO tag generation for multi-word cities & multi-occurrence placeholders
 # -----------------------------------
 tag2id = {"O": 0, "B-CITY": 1, "I-CITY": 2}
 id2tag = {v: k for k, v in tag2id.items()}
@@ -45,20 +45,34 @@ id2tag = {v: k for k, v in tag2id.items()}
 def generate_bio_tags_for_question(question: str, sql: str):
     tokens = tokenize(question)
     tags = ["O"] * len(tokens)
-    # extract real city names
+
+    # 2.1 Extract all city names from SQL (may be multi-word)
     city_names = re.findall(r'CITY_NAME\s*=\s*"([^"]+)"', sql)
-    # placeholders in question
+
+    # 2.2 Extract placeholders from question
     placeholders = re.findall(r'(city_name\d+)', question.lower())
+
+    # 2.3 Annotate all placeholder occurrences
     for ph, city in zip(placeholders, city_names):
         city_tokens = city.lower().split()
-        try:
-            idx = tokens.index(ph)
-        except ValueError:
-            continue
-        tags[idx] = "B-CITY"
-        for j in range(1, len(city_tokens)):
-            if idx + j < len(tags):
-                tags[idx + j] = "I-CITY"
+        L = len(city_tokens)
+        for i, tok in enumerate(tokens):
+            if tok == ph and tags[i] == "O":
+                tags[i] = "B-CITY"
+                for j in range(1, L):
+                    if i + j < len(tags) and tags[i+j] == "O":
+                        tags[i+j] = "I-CITY"
+
+    # 2.4 Sliding-window match for literal multi-word city names
+    for city in city_names:
+        city_tokens = city.lower().split()
+        L = len(city_tokens)
+        for i in range(len(tokens) - L + 1):
+            if tokens[i:i+L] == city_tokens and all(tags[i+j] == "O" for j in range(L)):
+                tags[i] = "B-CITY"
+                for j in range(1, L):
+                    tags[i+j] = "I-CITY"
+
     return tokens, [tag2id[t] for t in tags]
 
 # -----------------------------------
@@ -70,7 +84,7 @@ class JointDataset(Dataset):
         for item in data:
             tokens, tag_ids = generate_bio_tags_for_question(item["question"], item["sql"])
             input_ids = [vocab.get(tok, vocab[UNK]) for tok in tokens]
-            tpl = re.sub(r'"[^"]+"', '"VAR"', item["sql"])
+            tpl = re.sub(r'"[^\"]+"', '"VAR"', item["sql"])
             tpl = re.sub(r"\s+", " ", tpl.strip())
             tmpl_id = template2id[tpl]
             self.samples.append((input_ids, tmpl_id, tag_ids))
@@ -81,7 +95,7 @@ class JointDataset(Dataset):
     def __getitem__(self, idx):
         return self.samples[idx]
 
-# pad batch
+# Pad batch function
 
 def pad_batch(batch):
     input_ids, tmpl_ids, tag_ids = zip(*batch)

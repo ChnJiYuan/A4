@@ -9,7 +9,7 @@ from collections import Counter
 # -----------------------------------
 # 1. Load and preprocess data
 # -----------------------------------
-with open("data.json", "r") as f:
+with open("data.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
 # Tokenization function
@@ -29,13 +29,13 @@ for token in token_counter:
 template_counter = Counter()
 for item in data:
     sql_template = re.sub(r'"[^"]+"', '"VAR"', item["sql"])
-    sql_template = re.sub(r'\s+', ' ', sql_template.strip())
+    sql_template = re.sub(r"\s+", " ", sql_template.strip())
     template_counter[sql_template] += 1
 template2id = {tpl: i for i, tpl in enumerate(template_counter)}
 id2template = {i: tpl for tpl, i in template2id.items()}
 
 # -----------------------------------
-# 2. BIO tag generation for cities
+# 2. BIO tag generation for cities (multi-occurrence support)
 # -----------------------------------
 tag2id = {"O": 0, "B-CITY": 1, "I-CITY": 2}
 id2tag = {v: k for k, v in tag2id.items()}
@@ -44,24 +44,33 @@ def generate_bio_tags_for_question(question: str, sql: str):
     tokens = tokenize(question)
     tags = ["O"] * len(tokens)
 
-    # Extract real city names from SQL
+    # 2.1 Extract all city names from SQL
     city_names = re.findall(r'CITY_NAME\s*=\s*"([^"]+)"', sql)
-    # Extract placeholders from question
+    # 2.2 Find placeholders in question
     placeholders = re.findall(r'(city_name\d+)', question.lower())
 
+    # 2.3 Annotate all placeholder occurrences
     for ph, city in zip(placeholders, city_names):
         city_tokens = city.lower().split()
-        try:
-            idx = tokens.index(ph)
-        except ValueError:
-            continue
-        tags[idx] = "B-CITY"
-        for j in range(1, len(city_tokens)):
-            if idx + j < len(tags):
-                tags[idx + j] = "I-CITY"
+        L = len(city_tokens)
+        for i in range(len(tokens) - L + 1):
+            if tokens[i] == ph and tags[i] == "O":
+                tags[i] = "B-CITY"
+                for j in range(1, L):
+                    if i + j < len(tags) and tags[i+j] == "O":
+                        tags[i+j] = "I-CITY"
 
-    tag_ids = [tag2id[t] for t in tags]
-    return tokens, tag_ids
+    # 2.4 Sliding-window match for literal multi-word city names
+    for city in city_names:
+        city_tokens = city.lower().split()
+        L = len(city_tokens)
+        for i in range(len(tokens) - L + 1):
+            if tokens[i:i+L] == city_tokens and all(tags[i+j] == "O" for j in range(L)):
+                tags[i] = "B-CITY"
+                for j in range(1, L):
+                    tags[i+j] = "I-CITY"
+
+    return tokens, [tag2id[t] for t in tags]
 
 # -----------------------------------
 # 3. Dataset definitions
@@ -73,7 +82,7 @@ class ClassificationDataset(Dataset):
             tokens = tokenize(item["question"])
             ids = [vocab.get(tok, vocab[UNK]) for tok in tokens]
             sql_tpl = re.sub(r'"[^"]+"', '"VAR"', item["sql"])
-            sql_tpl = re.sub(r'\s+', ' ', sql_tpl.strip())
+            sql_tpl = re.sub(r"\s+", " ", sql_tpl.strip())
             tid = template2id[sql_tpl]
             self.samples.append((ids, tid))
 
@@ -98,13 +107,11 @@ class TaggingDataset(Dataset):
         return self.samples[idx]
 
 # Collate functions
-
 def collate_fn(batch):
     inputs, labels = zip(*batch)
     max_len = max(len(x) for x in inputs)
     padded = [x + [vocab[PAD]] * (max_len - len(x)) for x in inputs]
     return torch.tensor(padded), torch.tensor(labels)
-
 
 def collate_tagging(batch):
     inputs, tags = zip(*batch)
@@ -123,9 +130,9 @@ class LinearTemplateClassifier(nn.Module):
         self.linear = nn.Linear(embedding_dim, num_templates)
 
     def forward(self, x):
-        emb = self.embedding(x)         # (B, T, E)
-        pooled = emb.mean(dim=1)        # (B, E)
-        return self.linear(pooled)      # (B, num_templates)
+        emb = self.embedding(x)
+        pooled = emb.mean(dim=1)
+        return self.linear(pooled)
 
 class LinearSequenceTagger(nn.Module):
     def __init__(self, vocab_size, embedding_dim, num_tags):
@@ -134,8 +141,8 @@ class LinearSequenceTagger(nn.Module):
         self.linear = nn.Linear(embedding_dim, num_tags)
 
     def forward(self, x):
-        emb = self.embedding(x)        # (B, T, E)
-        logits = self.linear(emb)      # (B, T, num_tags)
+        emb = self.embedding(x)
+        logits = self.linear(emb)
         return logits
 
 # -----------------------------------

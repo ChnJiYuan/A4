@@ -35,7 +35,7 @@ template2id = {tpl: i for i, tpl in enumerate(template_counter)}
 id2template = {i: tpl for tpl, i in template2id.items()}
 
 # -----------------------------------
-# 2. BIO tags for multi-word cities
+# 2. BIO tags for multi-word cities & multi-occurrence placeholders
 # -----------------------------------
 tag2id = {"O": 0, "B-CITY": 1, "I-CITY": 2}
 id2tag = {v: k for k, v in tag2id.items()}
@@ -43,19 +43,32 @@ id2tag = {v: k for k, v in tag2id.items()}
 def generate_bio_tags_for_question(question: str, sql: str):
     tokens = tokenize(question)
     tags = ["O"] * len(tokens)
-    # Extract real names and placeholders
+
+    # Extract city names from SQL and placeholders in question
     cities = re.findall(r'CITY_NAME\s*=\s*"([^"]+)"', sql)
     placeholders = re.findall(r'(city_name\d+)', question.lower())
+
+    # 1) Annotate all placeholder occurrences
     for ph, city in zip(placeholders, cities):
         city_tokens = city.lower().split()
-        try:
-            idx = tokens.index(ph)
-        except ValueError:
-            continue
-        tags[idx] = "B-CITY"
-        for j in range(1, len(city_tokens)):
-            if idx + j < len(tags):
-                tags[idx + j] = "I-CITY"
+        L = len(city_tokens)
+        for i, tok in enumerate(tokens):
+            if tok == ph and tags[i] == "O":
+                tags[i] = "B-CITY"
+                for j in range(1, L):
+                    if i + j < len(tags) and tags[i + j] == "O":
+                        tags[i + j] = "I-CITY"
+
+    # 2) Sliding-window match for literal multi-word city names
+    for city in cities:
+        city_tokens = city.lower().split()
+        L = len(city_tokens)
+        for i in range(len(tokens) - L + 1):
+            if tokens[i:i+L] == city_tokens and all(tags[i + j] == "O" for j in range(L)):
+                tags[i] = "B-CITY"
+                for j in range(1, L):
+                    tags[i + j] = "I-CITY"
+
     return tokens, [tag2id[t] for t in tags]
 
 # -----------------------------------
@@ -71,8 +84,12 @@ class ClassificationDataset(Dataset):
             tpl = re.sub(r"\s+", " ", tpl.strip())
             tid = template2id[tpl]
             self.samples.append((ids, tid))
-    def __len__(self): return len(self.samples)
-    def __getitem__(self, idx): return self.samples[idx]
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
 
 class TaggingDataset(Dataset):
     def __init__(self, data, vocab):
@@ -81,8 +98,12 @@ class TaggingDataset(Dataset):
             tokens, tag_ids = generate_bio_tags_for_question(item["question"], item["sql"])
             ids = [vocab.get(t, vocab[UNK]) for t in tokens]
             self.samples.append((ids, tag_ids))
-    def __len__(self): return len(self.samples)
-    def __getitem__(self, idx): return self.samples[idx]
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
 
 # Collate functions
 
@@ -111,6 +132,7 @@ class FFTemplateClassifier(nn.Module):
             nn.ReLU(),
             nn.Linear(hid_dim, num_templates)
         )
+
     def forward(self, x):
         emb = self.embedding(x)          # (B, T, E)
         pooled = emb.mean(dim=1)         # (B, E)
@@ -125,6 +147,7 @@ class FFSequenceTagger(nn.Module):
             nn.ReLU(),
             nn.Linear(hid_dim, num_tags)
         )
+
     def forward(self, x):
         emb = self.embedding(x)          # (B, T, E)
         return self.ff(emb)              # (B, T, num_tags)
