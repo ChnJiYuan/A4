@@ -4,7 +4,7 @@ from pathlib import Path
 from collections import defaultdict
 
 # Load the JSON data
-with open("atis.json", "r") as f:
+with open("../atis.json", "r") as f:
     atis_data = json.load(f)
 
 # Helper function to normalize whitespace in SQL
