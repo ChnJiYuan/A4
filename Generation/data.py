@@ -133,4 +133,11 @@ def get_dataloaders(data_path, batch_size, min_freq=1, splits=('train','dev','te
     tgt_eos_idx = output_vocab.token2idx[EOS_TOKEN]
     input_dim = len(input_vocab)
     output_dim = len(output_vocab)
-    return train_loader, dev_loader, test_loader, src_pad_idx, tgt_pad_idx, tgt_sos_idx, tgt_eos_idx, input_dim, output_dim
+
+
+    return (
+        (train_loader, dev_loader, test_loader),  # loaders
+        (src_pad_idx, tgt_pad_idx, tgt_sos_idx, tgt_eos_idx),  # pad_idxs
+        (input_dim, output_dim)  # idxs
+    )
+
